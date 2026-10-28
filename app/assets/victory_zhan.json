@@ -1,0 +1,21 @@
+{
+  "source": "User-supplied local Phantom Blade Zero gameplay demo; analysis reference only",
+  "source_frame": "data/demo-audit/first-half/frame_0206.00.jpg",
+  "source_sha256": "b3a5425f3ec86e1e0d0f9e139d09ef82813ceddb99cbd9edbc523cbb15e4e90b",
+  "reference_count": 1,
+  "canonical_size": [
+    960,
+    540
+  ],
+  "crop_xywh": [
+    450,
+    30,
+    300,
+    420
+  ],
+  "mask": "min(R,G,B)>210 and max(R,G,B)-min(R,G,B)<42",
+  "threshold": 0.65,
+  "scope": "Large white victory glyph only, 16:9 SDR; not generic enemy recognition",
+  "independent_encounter_check": "data/demo-audit/second-half/exact_01045.00.jpg",
+  "limitations": "One demo, one training frame. Correlation is not a probability. Fade-out or changed UI may be missed."
+}

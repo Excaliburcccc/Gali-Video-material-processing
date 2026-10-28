@@ -1,0 +1,5 @@
+{
+  "host": "127.0.0.1",
+  "port": 4455,
+  "password": "REPLACE_WITH_YOUR_LOCAL_OBS_WEBSOCKET_PASSWORD"
+}
