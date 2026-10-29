@@ -47,7 +47,7 @@ class BossNameTrackerTests(unittest.TestCase):
 
 
 class ProfileIntegrationTests(unittest.TestCase):
-    def run_profile(self,source,output,interval,resume):
+    def run_profile(self,source,output,interval,resume,scope='legacy'):
         events={}; progress=[]; main_ocr_times=[]; decode_options=[]
 
         def frames(_path,_info,options,_cancelled):
@@ -79,7 +79,7 @@ class ProfileIntegrationTests(unittest.TestCase):
               patch('app.victory_detector.VictoryDetector') as detector):
             detector.return_value.detect.side_effect=victory
             analyze(str(source),output,{'game_profile':'phantom_blade_zero_demo','sample_interval':interval,
-                                      'resume_from':resume,'include_text':False},
+                                      'resume_from':resume,'include_text':False,'recognition_scope':scope},
                     lambda e:events.update({e['id']:dict(e)}),progress.append,lambda:False)
         return events,progress,main_ocr_times,decode_options[0]
 
@@ -109,6 +109,22 @@ class ProfileIntegrationTests(unittest.TestCase):
             self.assertEqual(resumed_ocr,[t for t in full_ocr if t>=2.1])
             self.assertAlmostEqual(options['sample_interval'],.35)
             self.assertEqual(full_ocr,[0,.7,1.4,2.1,2.8,3.5,4.2,4.9])
+
+    def test_collection_resume_keeps_original_first_boss_in_catalog(self):
+        from app.event_catalog import group_events
+        audit=ROOT/'data/demo-audit/second-half'
+        audit.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=audit) as temporary:
+            path=Path(temporary); source=path/'fixture.mp4'; source.write_bytes(b'')
+            full,_,_,_=self.run_profile(source,path/'full',1,0,'collection_only')
+            resumed,_,_,_=self.run_profile(source,path/'resumed',1,2.5,'collection_only')
+            self.assertEqual(len(full),1)
+            self.assertEqual(next(iter(full.values()))['kind'],'boss')
+            rows=[{**e,'video_id':'same-video'} for e in list(full.values())+list(resumed.values())]
+            catalog=group_events(rows,collection_only=True)
+            self.assertEqual(len(catalog),1)
+            self.assertEqual(catalog[0]['name'],'剑痴:花千笑')
+            self.assertEqual(catalog[0]['time'],0.)
 
 
 class AccumulatorEvidenceTests(unittest.TestCase):

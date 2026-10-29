@@ -67,6 +67,30 @@ def test_local_access_and_validation(client):
     vid=c.get('/api/state').json()['videos'][0]['id']
     assert c.post('/api/export',json={'video_id':vid,'start':2,'end':1}).status_code==400
 
+
+def test_collection_scope_filters_catalog_and_accepts_new_categories(client):
+    import json
+    from app.collection_taxonomy import COLLECTION_KINDS
+    c,path=client
+    vid=c.post('/api/import',json={'paths':[str(path)],'auto_analyze':False}).json()['ids'][0]
+    prior=query('SELECT options FROM videos WHERE id=?',(vid,),True)['options']
+    execute('UPDATE videos SET options=? WHERE id=?',(json.dumps({'recognition_scope':'collection_only','text_mode':'off'}),vid))
+    ids=[]
+    try:
+        for kind in COLLECTION_KINDS:
+            ids.append(server.insert_event(vid,{'name':'分类验证'+kind,'kind':kind,'time':1,'source':'ocr','evidence':'collection_panel'}))
+        ids.append(server.insert_event(vid,{'name':'普通教程字幕验证','kind':'text','time':1,'source':'ocr'}))
+        assert c.get('/api/events',params={'video_id':vid,'q':'普通教程字幕验证'}).json()['total']==0
+        for kind in COLLECTION_KINDS:
+            result=c.get('/api/events',params={'video_id':vid,'kind':kind,'q':'分类验证'}).json()
+            assert result['total']==1 and result['events'][0]['kind']==kind
+        assert c.post('/api/settings',json={'recognition_scope':'unknown'}).status_code==400
+        options=server.validate_options({'recognition_scope':'collection_only','text_mode':'all'})
+        assert options['text_mode']=='off'
+    finally:
+        for eid in ids: execute('DELETE FROM events WHERE id=?',(eid,))
+        execute('UPDATE videos SET options=? WHERE id=?',(prior,vid))
+
 def test_machine_upsert_preserves_human_edits(client):
     c,_=client
     vid=c.get('/api/state').json()['videos'][0]['id']

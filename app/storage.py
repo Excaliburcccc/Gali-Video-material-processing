@@ -8,7 +8,7 @@ DATA = ROOT / 'data'
 for folder in (DATA, DATA/'thumbnails', DATA/'proxies', DATA/'logs', ROOT/'exports', ROOT/'recordings'):
     folder.mkdir(parents=True, exist_ok=True)
 DB = DATA / 'library.sqlite3'
-DEFAULTS = {'sample_interval': 1.0, 'max_width': 1600, 'regions': [], 'keywords': {}, 'game_profile':'generic', 'text_mode':'compact'}
+DEFAULTS = {'sample_interval': 1.0, 'max_width': 1600, 'regions': [], 'keywords': {}, 'game_profile':'phantom_blade_zero_demo', 'text_mode':'off', 'recognition_scope':'collection_only'}
 
 def connect():
     db = sqlite3.connect(DB, timeout=30)

@@ -71,6 +71,12 @@ def _validate_options(options: dict) -> dict:
     result['text_mode']=result.get('text_mode','compact')
     if result['text_mode'] not in ('compact','all','off'):
         raise ValueError('未知的文字保留方式。')
+    result['recognition_scope'] = result.get('recognition_scope',
+        'collection_only' if result.get('game_profile') == 'phantom_blade_zero_demo' else 'legacy')
+    if result['recognition_scope'] not in ('collection_only', 'legacy'):
+        raise ValueError('未知的识别范围。')
+    if result['recognition_scope'] == 'collection_only':
+        result['text_mode'] = 'off'
     for key, default, low, high in (("sample_interval", 1.0, 0.2, 60), ("max_width", 1280, 320, 3840),
                                      ("resume_from", 0.0, 0, 1e9), ("min_confidence", .6, .1, 1)):
         value = float(result.get(key, default))
@@ -316,6 +322,10 @@ def analyze(video_path: str, output_dir: Path, options: dict,
     notifications. Region/keyword calibration is supported through options.
     """
     options = _validate_options(options)
+    focused = options['recognition_scope'] == 'collection_only'
+    if focused:
+        from .collection_taxonomy import detect_collection_candidates, FirstCollectionFilter
+        first_collections = FirstCollectionFilter()
     source = Path(video_path).expanduser().resolve(strict=True)
     if not source.is_file():
         raise ValueError("请导入一个录像文件。")
@@ -400,8 +410,9 @@ def analyze(video_path: str, output_dir: Path, options: dict,
                     name_tracker.observe(top_lines,frame.shape,timestamp)
                     # Keep independent raw text available for audit and search.
                     lines.extend(top_lines)
-                candidates = classify_lines(lines, options.get("keywords"), options.get("include_text", True))
-                if demo_profile:
+                candidates = (detect_collection_candidates(lines, frame.shape, timestamp, frame)
+                              if focused else classify_lines(lines, options.get("keywords"), options.get("include_text", True)))
+                if demo_profile and not focused:
                     candidates.extend(detect_panels(lines,frame.shape,timestamp))
                     candidates.extend(detect_navigation(lines,frame.shape,timestamp))
                     candidates.extend(detect_quests(lines,frame.shape,timestamp))
@@ -409,7 +420,7 @@ def analyze(video_path: str, output_dir: Path, options: dict,
                     if text_index.mode=='compact':
                         candidates=apply_scene_focus(candidates,detect_scene_focus(lines,frame.shape))
                 candidates=text_index.filter(candidates,lines,frame.shape,timestamp)
-                if demo_profile and text_index.mode=='compact':
+                if demo_profile and text_index.mode=='compact' and not focused:
                     candidates=boss_text_index.filter(candidates,lines,frame.shape,timestamp)
             if demo_profile:
                 match=victory_detector.detect(frame)
@@ -436,6 +447,8 @@ def analyze(video_path: str, output_dir: Path, options: dict,
                     screenshot_path = str(destination)
                 return screenshot_path
 
+            if focused:
+                candidates = first_collections.filter(candidates)
             accumulator.add(candidates, max(0, timestamp), save_screenshot)
             report("recognizing")
     finally:

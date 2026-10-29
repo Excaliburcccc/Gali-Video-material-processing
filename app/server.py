@@ -22,10 +22,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from . import media
 from .event_catalog import group_events, filter_groups
+from .collection_taxonomy import LABELS as COLLECTION_LABELS, COLLECTION_KINDS
 from .storage import ROOT, DATA, connect, query, execute, init_db, settings, save_settings, update_video, update_job
 
-KINDS={'item','weapon','boss','enemy','achievement','waypoint','quest','text','note'}
-LABELS={'item':'收集','weapon':'武器','boss':'BOSS','enemy':'击败','achievement':'成就','waypoint':'传送点','quest':'任务','text':'画面文字','note':'备注'}
+KINDS={'item','weapon','boss','enemy','achievement','waypoint','quest','text','note'} | COLLECTION_KINDS
+LABELS={'item':'收集','weapon':'武器','boss':'BOSS','enemy':'击败','achievement':'成就','waypoint':'传送点','quest':'任务','text':'画面文字','note':'备注',**COLLECTION_LABELS}
 EXTENSIONS={'.mp4','.mkv','.mov','.avi','.webm','.m4v','.ts'}
 analysis_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='ocr')
 media_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='media')
@@ -58,7 +59,10 @@ def finite(value, name, low=0, high=1e10):
 
 def validate_options(body):
     if not isinstance(body,dict): raise HTTPException(400,'设置格式无效')
-    values={k:body[k] for k in ('sample_interval','max_width','regions','keywords','game_profile','text_mode') if k in body}
+    values={k:body[k] for k in ('sample_interval','max_width','regions','keywords','game_profile','text_mode','recognition_scope') if k in body}
+    if 'recognition_scope' in values and values['recognition_scope'] not in ('collection_only','legacy'):
+        raise HTTPException(400,'未知的识别范围')
+    if values.get('recognition_scope')=='collection_only': values['text_mode']='off'
     if 'game_profile' in values and values['game_profile'] not in ('generic','phantom_blade_zero_demo'):
         raise HTTPException(400,'未知的游戏识别方案')
     if 'text_mode' in values and values['text_mode'] not in ('compact','all','off'):
@@ -147,6 +151,7 @@ def queue_analysis(video_id, options):
         validated=validate_options(options)
         prior=json.loads(video['options'] or '{}')
         opts={**settings(),**validated}
+        if opts.get('recognition_scope')=='collection_only': opts['text_mode']='off'
         resume=video['status'] in ('interrupted','cancelled','error') and prior==opts
         opts['resume_from']=max(0,video['checkpoint']-2*opts['sample_interval']) if resume else 0
         # Fresh scans replace machine candidates only. User-confirmed/edited work is retained.
@@ -205,7 +210,8 @@ def catalog_key(video):
     revision=query('SELECT revision FROM event_revisions WHERE video_id=?',(video['id'],),True)
     options=json.loads(video.get('options') or '{}')
     compact=options.get('text_mode','compact')=='compact'
-    return (str(DATA),video['id'],revision['revision'] if revision else 0,compact)
+    focused=options.get('recognition_scope')=='collection_only'
+    return (str(DATA),video['id'],revision['revision'] if revision else 0,compact,focused)
 
 
 def event_catalog(video):
@@ -217,7 +223,7 @@ def event_catalog(video):
             catalog_cache.move_to_end(key)
             return cached
     rows=query('SELECT e.*,v.name video_name,v.path video_path FROM events e JOIN videos v ON v.id=e.video_id WHERE e.video_id=? ORDER BY e.time,e.id',(video['id'],))
-    result=group_events(rows,compact=key[-1])
+    result=group_events(rows,compact=key[3],collection_only=key[4])
     with catalog_lock:
         for old in list(catalog_cache):
             if old[:2]==key[:2]: del catalog_cache[old]
@@ -290,6 +296,8 @@ async def local_only(request: Request, call_next):
     response=await call_next(request)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['Referrer-Policy']='no-referrer'
+    if request.url.path.startswith('/static/'):
+        response.headers['Cache-Control']='no-cache'
     return response
 
 @app.get('/')

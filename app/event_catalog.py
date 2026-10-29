@@ -2,6 +2,7 @@
 import re
 from difflib import SequenceMatcher
 from .rules import identity, clean_text
+from .collection_taxonomy import COLLECTION_KINDS, classify_existing_event
 
 _FOCUS={'boss_name','dialogue_speaker','map_selection'}
 _QUANTITY=re.compile(r'\s*[+＋\-－−]\s*\d+(?:\.\d+)?\s*$')
@@ -115,10 +116,14 @@ def primary_rows(rows):
     return result
 
 
-def group_events(rows, compact=True):
+def group_events(rows, compact=True, collection_only=False):
     groups = {}
-    rows=entity_rows(rows)
-    if compact: rows=primary_rows(rows)
+    if collection_only:
+        rows=[mapped for row in rows if (mapped := classify_existing_event(row)) is not None]
+        rows=[{**row,'first_occurrence_only':row['kind'] in COLLECTION_KINDS} for row in rows]
+    else:
+        rows=entity_rows(rows)
+        if compact: rows=primary_rows(rows)
     for row in sorted(rows, key=lambda e: (e['time'], e['id'])):
         first_only=(identity(_base_name(row['name'])) not in _ANONYMOUS_NAMES
                     and (bool(row.get('first_occurrence_only'))

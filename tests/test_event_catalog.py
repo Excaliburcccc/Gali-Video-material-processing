@@ -1,6 +1,21 @@
 from app.event_catalog import group_events, filter_groups
 
 
+def test_collection_catalog_rejects_prose_and_keeps_first_typed_object():
+    rows=[event('a',1,'accessory','影动猎杀仪',evidence='collection_panel',text='攻击类饰品'),
+          event('b',30,'accessory','影动猎杀仪',evidence='collection_panel',text='攻击类饰品'),
+          event('noise',2,'text','你们究竟是什么人'),
+          event('book',3,'book','新娘阿花',evidence='reading_selection')]
+    out=group_events(rows,collection_only=True)
+    assert [(e['id'],e['kind']) for e in out]==[('a','accessory'),('book','book')]
+    assert all(e['first_occurrence_only'] and e['occurrence_count']==1 for e in out)
+
+
+def test_typed_accessory_inventory_is_not_coerced_to_weapon():
+    out=group_events([event('a',1,'accessory','药葫芦',evidence='inventory_selection')],collection_only=True)
+    assert len(out)==1 and out[0]['kind']=='accessory'
+
+
 def event(key,time,kind='text',name='地点甲',**kwargs):
     return dict(id=key,video_id='video',kind=kind,name=name,time=time,end_time=time+2,
                 source='ocr',verified=0,**kwargs)

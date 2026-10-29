@@ -12,3 +12,14 @@
 .event-occurrence-count{display:block;font-size:11px;color:var(--faint);margin-top:4px}.occurrence-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;max-height:192px;overflow:auto;padding:3px}.occurrence-list button{font-size:12px;font-variant-numeric:tabular-nums;min-height:34px;padding:5px 10px}.occurrence-list button[aria-pressed="true"]{border-color:var(--text);background:var(--active);color:var(--text)}
 
 .timeline-marker[data-kind="weapon"]{background:#bca781}.timeline-marker[data-kind="boss"]{background:#c48787}
+
+.kind-tabs{display:block;flex-shrink:0;margin-top:12px;padding-bottom:10px;max-height:45vh;overflow:auto}
+.kind-primary,.kind-options{display:flex;flex-wrap:wrap;gap:4px}
+.kind-tabs button{flex:0 1 auto;white-space:normal;min-height:32px;padding:4px 9px;border:1px solid transparent;border-radius:5px;text-align:left;line-height:1.45}
+.kind-tabs button.active{background:var(--active);border-color:var(--control);color:var(--text)}
+.kind-tabs button:hover:not(:disabled){background:var(--surface)}
+.kind-group{margin-top:9px}
+.kind-group h3{margin:0 0 4px 4px;font-size:12px;font-weight:500;color:var(--muted)}
+.kind-primary button{min-width:58px;text-align:center}
+.event-meta{flex-wrap:wrap}
+@media(max-width:700px){.kind-tabs{max-height:none}.kind-tabs button{min-height:44px}.kind-group{margin-top:10px}}
