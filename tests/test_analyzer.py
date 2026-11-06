@@ -107,6 +107,20 @@ class AccumulatorTests(unittest.TestCase):
             raise AssertionError("No candidate should create a screenshot")
         self.accumulator.add([], 1, fail)
 
+    def test_book_same_title_at_different_times_is_retained(self):
+        book = {**self.candidate, 'kind': 'book', 'name': '四凶斧案卷'}
+        for stamp in (10, 11, 12):
+            self.accumulator.add([book], stamp, lambda: 'book.jpg')
+        self.accumulator.flush()
+        self.assertEqual(len({row['id'] for row in self.events}), 3)
+
+    def test_book_only_same_timestamp_and_frame_is_merged(self):
+        book = {**self.candidate, 'kind': 'book', 'name': '四凶斧案卷'}
+        self.accumulator.add([book, book], 10, lambda: 'book.jpg')
+        self.accumulator.add([book], 10, lambda: 'another-page.jpg')
+        self.accumulator.flush()
+        self.assertEqual(len({row['id'] for row in self.events}), 2)
+
     def test_validation(self):
         for options in [{"sample_interval": 0}, {"resume_from": -1}, {"regions": [{"x": .8, "y": 0, "w": .5, "h": 1}]}, {"sample_interval": float("nan")}]:
             with self.assertRaises(ValueError):

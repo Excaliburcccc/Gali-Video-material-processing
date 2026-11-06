@@ -13,6 +13,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -66,6 +67,16 @@ def _scaled_size(width: int, height: int, limit: int) -> tuple[int, int]:
 
 def _validate_options(options: dict) -> dict:
     result = dict(options or {})
+    if result.get('_profile') is not None:
+        from .game_schemes import validate_profile
+        profile = validate_profile(result['_profile'])
+        result['_profile'] = profile
+        result['game_profile'] = profile['adapter']
+        result['recognition_scope'] = 'collection_only' if profile['adapter'] == 'phantom_blade_zero_demo' else 'legacy'
+        result['text_mode'] = 'off'
+        result['include_text'] = False
+        if profile['regions'] and not result.get('regions'):
+            result['regions'] = profile['regions']
     if result.get('game_profile','generic') not in ('generic','phantom_blade_zero_demo'):
         raise ValueError('未知的游戏识别方案。')
     result['text_mode']=result.get('text_mode','compact')
@@ -83,6 +94,11 @@ def _validate_options(options: dict) -> dict:
         if not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"{key} 必须在 {low} 和 {high} 之间。")
         result[key] = int(value) if key == "max_width" else value
+    if result.get('analysis_end') is not None:
+        end = float(result['analysis_end'])
+        if not math.isfinite(end) or end <= result['resume_from']:
+            raise ValueError('试识别终点必须晚于起点')
+        result['analysis_end'] = end
     regions = result.get("regions") or []
     if not isinstance(regions, list) or len(regions) > 8:
         raise ValueError("识别区域需要是列表，最多 8 个。")
@@ -144,6 +160,68 @@ def _ocr_lines(frame, regions: list, engine, confidence: float) -> list[OCRLine]
     return lines
 
 
+class OCREvidenceCache:
+    """Bounded local OCR evidence, separate from rules and event selection.
+
+    Source stat, OCR implementation version, scale, regions and confidence are
+    all part of the key. Rule/category edits can reuse text; unseen crops cannot.
+    No video or image is saved here, and corrupt cache rows are safely reread.
+    """
+    def __init__(self, path, source, max_width):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        # Trial and full scans can share this cache. Each write is atomic and
+        # immediately committed; never hold a write lock across OCR inference.
+        self.db = sqlite3.connect(path, timeout=1, isolation_level=None)
+        self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.execute('CREATE TABLE IF NOT EXISTS reads (key TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        stat = Path(source).stat()
+        self.source_key = [str(Path(source).resolve()).casefold(), stat.st_size, stat.st_mtime_ns,
+                           int(max_width), 'rapidocr-onnx-ppocrv3-v1']
+        self.hits, self.misses, self.writes = 0, 0, 0
+        self.count = self.db.execute('SELECT COUNT(*) FROM reads').fetchone()[0]
+
+    def read(self, frame, regions, engine, confidence, timestamp):
+        key = hashlib.sha256(json.dumps([self.source_key, list(frame.shape[:2]), regions, confidence,
+                                        round(timestamp, 6)], sort_keys=True).encode()).hexdigest()
+        try:
+            row = self.db.execute('SELECT payload FROM reads WHERE key=?', (key,)).fetchone()
+        except sqlite3.Error:
+            row = None  # A cache lock/error must never abort recognition.
+        if row:
+            try:
+                data = json.loads(row[0])
+                lines = [OCRLine(str(item['text']), float(item['score']), item['box']) for item in data]
+                self.hits += 1
+                return lines
+            except (ValueError, TypeError, KeyError):
+                try:
+                    self.db.execute('DELETE FROM reads WHERE key=?', (key,))
+                except sqlite3.Error:
+                    pass
+        self.misses += 1
+        lines = _ocr_lines(frame, regions, engine, confidence)
+        # Keep memory/disk bounded for days-long recordings. Existing evidence
+        # remains readable if the cap is reached; uncached samples still work.
+        if self.count < 100000 and self.path.stat().st_size < 256 * 1024 * 1024:
+            payload = json.dumps([{'text': line.text, 'score': line.score, 'box': line.box}
+                                  for line in lines[:1000]], ensure_ascii=False)
+            try:
+                self.db.execute('INSERT OR REPLACE INTO reads VALUES (?,?)', (key, payload))
+                self.count += 1
+                self.writes += 1
+            except sqlite3.Error:
+                pass
+        return lines
+
+    def close(self):
+        try:
+            self.db.close()
+        except sqlite3.Error:
+            pass
+
+
 class EventAccumulator:
     """Emit a stable ID immediately and UPSERT the same event when its prompt ends.
 
@@ -158,13 +236,42 @@ class EventAccumulator:
         self.active: dict[tuple[str, str], dict] = {}
         self.count = 0
 
-    def add(self, candidates: list[dict], timestamp: float, screenshot: Callable[[], str]) -> None:
+    def add(self, candidates: list[dict], timestamp: float, screenshot: Callable[[], str], observed=True) -> None:
         self.expire(timestamp)
+        resolved=[]
+        for candidate in candidates:
+            if (candidate['kind']=='book' and not candidate.get('_profile_rule') and ' · ' not in candidate['name']
+                    and candidate.get('evidence')=='collection_panel'):
+                matches=[item['event']['name'] for item in self.active.values()
+                         if item['event']['kind']=='book' and ' · ' in item['event']['name']
+                         and timestamp<=item['event']['end_time']+.01
+                         and identity(candidate['name'])==identity(item['event']['name'].partition(' · ')[2])]
+                if len(set(matches))==1: candidate={**candidate,'name':matches[0]}
+            resolved.append(candidate)
+        candidates=resolved
+        # An OCR-observed absence closes a book panel immediately. Visual-only
+        # samples between OCR frames must not split one continuous popup.
+        if observed:
+            book_names={identity(c['name']) for c in candidates if c['kind']=='book'}
+            profile_names={(c['kind'], identity(c['name']), c.get('semantic')) for c in candidates if c.get('_profile_rule')}
+            for key in list(self.active):
+                event=self.active[key]['event']
+                missing_profile = event.get('_profile_rule') and (event['kind'], identity(event['name']), event.get('semantic')) not in profile_names
+                if missing_profile or (event['kind']=='book' and identity(event['name']) not in book_names):
+                    self.on_event(dict(self.active.pop(key)['event']))
         for candidate in candidates[:100]:
-            text_group=candidate['kind']=='text' and candidate.get('_identity_key')
+            text_group=(candidate['kind'] in {'text','boss'} or candidate.get('_profile_rule')) and candidate.get('_identity_key')
             key = (candidate["kind"], str(text_group) if text_group else identity(candidate["name"]))
             if not key[1]:
                 continue
+            if candidate.get('_keep_all'):
+                key = (key[0], f'{key[1]}|sample:{timestamp:.6f}')
+            book_screenshot = None
+            if candidate['kind'] == 'book' and not candidate.get('_profile_rule') and not (
+                    candidate.get('evidence')=='collection_panel' and ' · ' in candidate['name']):
+                # Without a chapter, a repeated cover name is ambiguous.
+                book_screenshot = screenshot()
+                key = (key[0], f'{key[1]}|{timestamp:.3f}|{book_screenshot}')
             current = self.active.get(key)
             if current:
                 current["last_seen"] = timestamp
@@ -173,7 +280,7 @@ class EventAccumulator:
                 # victory glyph. Keep the evidence instead of freezing the
                 # weaker first frame's metadata for the entire occurrence.
                 event=current["event"]
-                if candidate['kind']=='text' and candidate.get('_replace_name'):
+                if candidate['kind'] in {'text','boss'} and candidate.get('_replace_name'):
                     event['name']=candidate['name']
                     event['confidence']=float(candidate.get('confidence',0))
                 for field in ('confidence','detection_score'):
@@ -186,13 +293,13 @@ class EventAccumulator:
                     event['text']=candidate['text']
                 continue
             event = dict(candidate)
-            for field in ('_interval','_merge_gap','_identity_key','_replace_name'):
+            for field in ('_interval','_merge_gap','_identity_key','_replace_name','_keep_all'):
                 event.pop(field,None)
             signature = f"{self.video_key}|{key[0]}|{key[1]}|{timestamp:.3f}"
             event.update(id="ocr_" + hashlib.sha256(signature.encode("utf-8")).hexdigest()[:28],
                          time=round(max(0, timestamp), 3), end_time=round(timestamp + float(candidate.get('_interval',self.interval)), 3),
-                         screenshot=screenshot(), source="ocr", verified=0)
-            merge_gap=float(candidate.get('_merge_gap',self.gap)) if candidate['kind']=='text' else self.gap
+                         screenshot=book_screenshot if book_screenshot is not None else screenshot(), source="ocr", verified=0)
+            merge_gap=float(candidate.get('_merge_gap',self.gap)) if text_group else self.gap
             self.active[key] = {"event": event, "last_seen": timestamp, "gap":min(30,max(self.gap,merge_gap))}
             self.on_event(dict(event))
             self.count += 1
@@ -225,6 +332,11 @@ def _sampled_frames(video_path: str, info: dict, options: dict, cancelled: Calla
     # Sampling on absolute time buckets gives resumed runs the same frames/IDs.
     filter_text = f"select='isnan(prev_selected_t)+gt(floor((t+0.0000001)/{interval:.9f}),floor((prev_selected_t+0.0000001)/{interval:.9f}))',scale={width}:{height},showinfo"
     command = [_binary("ffmpeg", options), "-hide_banner", "-nostdin", "-loglevel", "info", "-copyts", "-start_at_zero"]
+    if options.get('_cuda_decode'):
+        # Explicit opt-in for local backfills on supported NVIDIA machines.
+        # Download only selected frames; preserve the same source PTS grid.
+        command += ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']
+        filter_text = filter_text.replace(',scale=', ',hwdownload,format=nv12|p010le,scale=')
     seek_time = math.floor((options["resume_from"] + 1e-7) / interval) * interval
     if seek_time > 0:
         command += ["-ss", f"{seek_time:.6f}"]
@@ -322,6 +434,9 @@ def analyze(video_path: str, output_dir: Path, options: dict,
     notifications. Region/keyword calibration is supported through options.
     """
     options = _validate_options(options)
+    profile = options.get('_profile')
+    if profile:
+        from .game_schemes import detect_profile_candidates
     focused = options['recognition_scope'] == 'collection_only'
     if focused:
         from .collection_taxonomy import detect_collection_candidates, FirstCollectionFilter
@@ -333,34 +448,50 @@ def analyze(video_path: str, output_dir: Path, options: dict,
     output_dir.mkdir(parents=True, exist_ok=True)
     info = probe_video(str(source), options)
     duration = info["duration"]
+    scan_end = min(duration, options.get('analysis_end', duration))
     interval = options["sample_interval"]
     last_time = min(options["resume_from"], duration)
     frames = 0
     started = time.monotonic()
     def persist_event(event: dict):
-        event["end_time"] = min(duration, event["end_time"])
+        event["end_time"] = min(scan_end, event["end_time"])
+        if profile:
+            event['profile_id'] = profile['id']
+            event['profile_version'] = profile['version']
         on_event(event)
 
     accumulator = EventAccumulator(str(source).casefold(), interval, persist_event)
 
     def report(stage: str):
         on_progress({"stage": stage, "time": round(last_time, 3), "processed_seconds": round(last_time, 3),
-                     "duration": duration, "progress": min(1.0, max(0.0, last_time / duration)),
+                     "duration": duration, "progress": min(1.0, max(0.0,
+                         (last_time - options['resume_from']) / max(.001, scan_end - options['resume_from'])
+                         if options.get('analysis_end') is not None else last_time / duration)),
                      "checkpoint": max(0, last_time - interval), "frames": frames, "events": accumulator.count,
                      "elapsed_seconds": round(time.monotonic() - started, 1)})
 
     report("loading")
     if cancelled():
         return {"status": "cancelled", "events": 0, "frames": 0, "checkpoint": last_time, "duration": duration}
-    if options["resume_from"] >= duration:
-        last_time = duration
+    if options["resume_from"] >= scan_end:
+        last_time = scan_end
         report("completed")
-        return {"status": "completed", "events": 0, "frames": 0, "checkpoint": duration, "duration": duration}
+        return {"status": "completed", "events": 0, "frames": 0, "checkpoint": scan_end, "duration": duration}
     engine = _engine()
     from .text_index import TextIndexFilter
     text_index=TextIndexFilter(mode=options['text_mode'] if options.get('include_text',True) else 'off')
     import cv2
     demo_profile=options.get('game_profile')=='phantom_blade_zero_demo'
+    cache = None
+    if profile:
+        try:
+            cache = OCREvidenceCache(options.get('ocr_cache_path') or output_dir / 'ocr-cache.sqlite3', source,
+                                     options['max_width'])
+        except (OSError, sqlite3.Error):
+            pass  # The cache is an optional optimization, never a dependency.
+    def read_ocr(frame, regions, confidence, timestamp):
+        return (cache.read(frame, regions, engine, confidence, timestamp) if cache else
+                _ocr_lines(frame, regions, engine, confidence))
     decode_options=dict(options)
     name_tracker=None
     analysis_start=0.0
@@ -371,7 +502,8 @@ def analyze(video_path: str, output_dir: Path, options: dict,
         from .upgrade_materials import filter_upgrade_materials
         from .victory_detector import VictoryDetector
         from .game_profile import BossNameTracker
-        from .scene_focus import detect_scene_focus, apply_scene_focus
+        from .scene_focus import detect_scene_focus, apply_scene_focus, _lines as scene_lines
+        from .collection_refinement import is_equipment_menu
         from .boss_text_index import BossTextIndex
         victory_detector=VictoryDetector()
         name_tracker=BossNameTracker()
@@ -393,25 +525,38 @@ def analyze(video_path: str, output_dir: Path, options: dict,
         for timestamp, frame in _sampled_frames(str(source), info, decode_options, cancelled):
             if cancelled():
                 break
+            if timestamp >= scan_end:
+                break
             bucket=math.floor((timestamp+1e-7)/interval)
             if demo_profile and timestamp+1e-7<analysis_start:
                 if bucket!=last_ocr_bucket:
                     last_ocr_bucket=bucket
-                    top_lines=_ocr_lines(frame,[{'x':.32,'y':.035,'w':.36,'h':.12}],engine,.6)
+                    top_lines=read_ocr(frame,[{'x':.32,'y':.035,'w':.36,'h':.12}],.6,timestamp)
                     name_tracker.observe(top_lines,frame.shape,timestamp)
+                continue
+            if options.get('analysis_end') is not None and timestamp < options['resume_from']:
                 continue
             last_time = max(last_time, timestamp)
             candidates=[]
-            if bucket!=last_ocr_bucket:
+            observed=bucket!=last_ocr_bucket
+            if observed:
                 last_ocr_bucket=bucket
-                lines = _ocr_lines(frame, options.get("regions") or [], engine, options["min_confidence"])
+                lines = read_ocr(frame, options.get("regions") or [], options["min_confidence"], timestamp)
+                if focused:
+                    from .collection_refinement import refine_collection_lines
+                    lines = refine_collection_lines(lines, frame, engine)
                 if demo_profile:
-                    top_lines=_ocr_lines(frame,[{'x':.32,'y':.035,'w':.36,'h':.12}],engine,.6)
+                    top_lines=read_ocr(frame,[{'x':.32,'y':.035,'w':.36,'h':.12}],.6,timestamp)
                     name_tracker.observe(top_lines,frame.shape,timestamp)
                     # Keep independent raw text available for audit and search.
                     lines.extend(top_lines)
-                candidates = (detect_collection_candidates(lines, frame.shape, timestamp, frame)
-                              if focused else classify_lines(lines, options.get("keywords"), options.get("include_text", True)))
+                if profile and not demo_profile:
+                    candidates = detect_profile_candidates(lines, frame.shape, timestamp, profile)
+                else:
+                    candidates = (detect_collection_candidates(lines, frame.shape, timestamp, frame)
+                                  if focused else classify_lines(lines, options.get("keywords"), options.get("include_text", True)))
+                    if profile and profile['rules']:
+                        candidates.extend(detect_profile_candidates(lines, frame.shape, timestamp, profile))
                 if demo_profile and not focused:
                     candidates.extend(detect_panels(lines,frame.shape,timestamp))
                     candidates.extend(detect_navigation(lines,frame.shape,timestamp))
@@ -419,8 +564,16 @@ def analyze(video_path: str, output_dir: Path, options: dict,
                     candidates=filter_upgrade_materials(candidates,lines,frame.shape)
                     if text_index.mode=='compact':
                         candidates=apply_scene_focus(candidates,detect_scene_focus(lines,frame.shape))
-                candidates=text_index.filter(candidates,lines,frame.shape,timestamp)
-                if demo_profile and text_index.mode=='compact' and not focused:
+                    if is_equipment_menu(scene_lines(lines,frame.shape)):
+                        candidates=[c for c in candidates if not (c.get('kind')=='weapon'
+                            or c.get('evidence')=='inventory_selection' or c.get('panel_type')=='weapon')]
+                if not profile or demo_profile:
+                    candidates=text_index.filter(candidates,lines,frame.shape,timestamp)
+                if demo_profile and focused:
+                    # The typed collection path used to bypass the HUD tracker,
+                    # emitting a new boss for every one-character OCR wobble.
+                    candidates=boss_text_index.filter_collections(candidates,lines,frame.shape,timestamp)
+                elif demo_profile and text_index.mode=='compact':
                     candidates=boss_text_index.filter(candidates,lines,frame.shape,timestamp)
             if demo_profile:
                 match=victory_detector.detect(frame)
@@ -447,17 +600,35 @@ def analyze(video_path: str, output_dir: Path, options: dict,
                     screenshot_path = str(destination)
                 return screenshot_path
 
-            if focused:
+            if focused and not profile:
                 candidates = first_collections.filter(candidates)
-            accumulator.add(candidates, max(0, timestamp), save_screenshot)
+            elif profile:
+                enabled = {category['id']: category for category in profile['categories'] if category['enabled']}
+                kept = []
+                for candidate in candidates:
+                    if focused and not candidate.get('_profile_rule'):
+                        from .collection_taxonomy import classify_existing_event
+                        candidate = classify_existing_event(candidate)
+                    if candidate is not None and candidate['kind'] in enabled:
+                        if enabled[candidate['kind']]['policy'] == 'all':
+                            candidate = {**candidate, '_keep_all': True}
+                        kept.append(candidate)
+                candidates = kept
+            accumulator.add(candidates, max(0, timestamp), save_screenshot, observed=observed)
             report("recognizing")
     finally:
         accumulator.flush()
+        if cache:
+            cache.close()
     status = "cancelled" if cancelled() else "completed"
     if status == "completed":
-        last_time = duration
+        last_time = scan_end
     report(status)
     return {"status": status, "events": accumulator.count, "frames": frames,
-            "checkpoint": max(0, last_time - interval) if status == "cancelled" else duration,
+            "checkpoint": max(0, last_time - interval) if status == "cancelled" else scan_end,
             "duration": duration, "elapsed_seconds": round(time.monotonic() - started, 1),
-            "text_mode":text_index.mode,"text_index_stats":dict(text_index.stats)}
+            "text_mode":text_index.mode,"text_index_stats":dict(text_index.stats),
+            "profile_id": profile['id'] if profile else options.get('game_profile', 'generic'),
+            "profile_version": profile['version'] if profile else None,
+            "analysis_end": scan_end,
+            "ocr_cache": {'hits': cache.hits, 'misses': cache.misses} if cache else None}

@@ -118,13 +118,15 @@ class ProfileIntegrationTests(unittest.TestCase):
             path=Path(temporary); source=path/'fixture.mp4'; source.write_bytes(b'')
             full,_,_,_=self.run_profile(source,path/'full',1,0,'collection_only')
             resumed,_,_,_=self.run_profile(source,path/'resumed',1,2.5,'collection_only')
-            self.assertEqual(len(full),1)
-            self.assertEqual(next(iter(full.values()))['kind'],'boss')
+            # The HUD tracker waits for two independent readings. Keep both
+            # name and victory evidence; deduplication belongs to the catalog.
+            self.assertEqual({e['evidence'] for e in full.values()},{'boss_name','victory_template'})
+            self.assertTrue(all(e['kind']=='boss' for e in full.values()))
             rows=[{**e,'video_id':'same-video'} for e in list(full.values())+list(resumed.values())]
             catalog=group_events(rows,collection_only=True)
             self.assertEqual(len(catalog),1)
             self.assertEqual(catalog[0]['name'],'剑痴:花千笑')
-            self.assertEqual(catalog[0]['time'],0.)
+            self.assertEqual(catalog[0]['time'],1.)
 
 
 class AccumulatorEvidenceTests(unittest.TestCase):

@@ -8,7 +8,8 @@ def test_collection_catalog_rejects_prose_and_keeps_first_typed_object():
           event('book',3,'book','新娘阿花',evidence='reading_selection')]
     out=group_events(rows,collection_only=True)
     assert [(e['id'],e['kind']) for e in out]==[('a','accessory'),('book','book')]
-    assert all(e['first_occurrence_only'] and e['occurrence_count']==1 for e in out)
+    assert out[0]['first_occurrence_only'] and not out[1]['first_occurrence_only']
+    assert all(e['occurrence_count']==1 for e in out)
 
 
 def test_typed_accessory_inventory_is_not_coerced_to_weapon():
@@ -19,6 +20,50 @@ def test_typed_accessory_inventory_is_not_coerced_to_weapon():
 def event(key,time,kind='text',name='地点甲',**kwargs):
     return dict(id=key,video_id='video',kind=kind,name=name,time=time,end_time=time+2,
                 source='ocr',verified=0,**kwargs)
+
+
+def test_memory_petals_merge_ocr_variants_without_losing_other_chapters():
+    rows = [event('one',10,'memory_flower','某人的记忆之花 · 其三:崭新的力量'),
+            event('typo',11,'memory_flower','某人的记忆之花 · 其三:斩新的力量'),
+            event('missing',12,'memory_flower','某人的记忆之花'),
+            event('two',30,'memory_flower','某人的记忆之花 · 其二:归来'),
+            event('unknown-later',90,'memory_flower','某人的记忆之花')]
+    out = group_events(rows, collection_only=True)
+    assert [row['id'] for row in out] == ['one','two','unknown-later']
+    assert rows[2]['name'] == '某人的记忆之花'
+    rows[2]['verified'] = 1
+    assert 'missing' in {row['id'] for row in group_events(rows,collection_only=True)}
+
+
+def test_memory_menu_evidence_is_excluded():
+    assert group_events([event('menu',1,'reading_memory','某人的记忆之花',evidence='memory_menu')],
+                        collection_only=True) == []
+
+
+def test_memory_quote_artifact_and_transient_missing_chapter_merge():
+    rows=[event('first',10,'memory_flower','有关龙体之术白的记忆之花 · 其二:同流合污还是贪生怕死?'),
+          event('clear',10.5,'memory_flower','有关龙体之术的记忆之花 · 其二:同流合污还是贪生怕死?'),
+          event('partial',11,'memory_flower','有关龙体之术自的记忆之花'),
+          event('later',90,'memory_flower','有关龙体之术的记忆之花 · 其四:抗争之法')]
+    out=group_events(rows,collection_only=True)
+    assert [row['id'] for row in out] == ['first','later']
+    assert out[0]['name'] == '有关龙体之术的记忆之花 · 其二:同流合污还是贪生怕死?'
+
+
+def test_memory_numeral_misread_cannot_erase_a_different_chapter():
+    rows=[event('one',10,'memory_flower','陆家村村民的记忆之花 · 其一:爱人重逢'),
+          event('misread',10.5,'memory_flower','陆家村村民的记忆之花 · 其二:爱人重逢'),
+          event('two',60,'memory_flower','陆家村村民的记忆之花 · 其二:是我儿吗?')]
+    out=group_events(rows,collection_only=True)
+    assert [row['id'] for row in out] == ['one','two']
+
+
+def test_memory_confirmed_missing_rare_character_is_one_chapter():
+    rows=[event('first',10,'memory_flower','白赤练的记忆之花 · 其二:圣母言'),
+          event('typo',12,'memory_flower','白赤练的记忆之花 · 其二:圣母識言')]
+    out=group_events(rows,collection_only=True)
+    assert len(out) == 1
+    assert out[0]['name'] == '白赤练的记忆之花 · 其二:圣母谶言'
 
 
 def test_waypoint_first_only_preserves_first_segment_and_raw_edits():

@@ -17,6 +17,17 @@ def connect():
     return db
 
 def init_db():
+    # Back up pre-project libraries before adding scope metadata. The original
+    # video/event rows are never rewritten or removed by this migration.
+    if DB.is_file() and os.environ.get('FOOTAGE_TEST') != '1':
+        with connect() as existing:
+            columns = {row['name'] for row in existing.execute('PRAGMA table_info(videos)')}
+            if columns and 'project_id' not in columns:
+                backup = DATA/'backups'/'before-game-projects.sqlite3'
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                if not backup.exists():
+                    with sqlite3.connect(backup) as destination:
+                        existing.backup(destination)
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript('''
@@ -70,6 +81,8 @@ END;
         for row in db.execute("SELECT id,video_id FROM events WHERE source='ocr'").fetchall():
             if not row['id'].startswith(row['video_id']+'_'):
                 db.execute('UPDATE events SET id=? WHERE id=?',(row['video_id']+'_'+row['id'],row['id']))
+        from .projects import initialize
+        initialize(db)
 
 def query(sql, args=(), one=False):
     with connect() as db:

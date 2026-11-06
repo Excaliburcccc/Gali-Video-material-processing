@@ -30,6 +30,67 @@ def test_import_is_idempotent_and_not_copied(client):
     assert state['videos'][0]['path']==str(path.resolve())
     assert state['videos'][0]['duration']==pytest.approx(3,.1)
 
+
+@pytest.mark.parametrize('paths',[[],['F:/新录像/第一段.mkv','F:/新录像/第二段.mp4']])
+def test_picker_unicode_multiselect_and_cancel(client,monkeypatch,paths):
+    import json
+    c,_=client
+    before=query('SELECT id FROM videos ORDER BY id')
+    def selected(args,**kwargs):
+        assert Path(args[-1]).is_file()  # Helper comes from code, not the test data root.
+        assert kwargs['encoding']=='utf-8' and kwargs['errors']=='replace'
+        assert kwargs['env']['PYTHONIOENCODING']=='utf-8'
+        return subprocess.CompletedProcess(args,0,json.dumps(paths,ensure_ascii=False),'')
+    monkeypatch.setattr(server.subprocess,'run',selected)
+    response=c.post('/api/pick-files')
+    assert response.status_code==200 and response.json()=={'paths':paths}
+    assert query('SELECT id FROM videos ORDER BY id')==before
+
+
+@pytest.mark.parametrize('result',[
+    subprocess.CompletedProcess([],1,'',None),
+    subprocess.CompletedProcess([],1,'','中文组件错误'),
+    subprocess.CompletedProcess([],0,'',None),
+    subprocess.CompletedProcess([],0,'null',''),
+    subprocess.CompletedProcess([],0,'[123]',''),
+])
+def test_picker_failures_have_readable_message(client,monkeypatch,result):
+    c,_=client
+    monkeypatch.setattr(server.subprocess,'run',lambda *a,**k:result)
+    response=c.post('/api/pick-files')
+    assert response.status_code==500
+    assert response.json()['detail']=='文件选择器未能打开，请重试或粘贴录像的完整路径。'
+
+
+def test_picker_timeout_can_be_retried(client,monkeypatch):
+    c,_=client
+    def timed_out(*args,**kwargs):
+        raise subprocess.TimeoutExpired(args[0],300)
+    monkeypatch.setattr(server.subprocess,'run',timed_out)
+    response=c.post('/api/pick-files')
+    assert response.status_code==408 and '重新点击' in response.json()['detail']
+
+
+@pytest.mark.parametrize('gui_available',[True,False])
+def test_picker_bypasses_windows_venv_console_redirector(client,monkeypatch,tmp_path,gui_available):
+    c,_=client
+    base=tmp_path/'Python'
+    base.mkdir()
+    (base/'python.exe').touch()
+    if gui_available:
+        (base/'pythonw.exe').touch()
+    monkeypatch.setattr(server.sys,'platform','win32')
+    monkeypatch.setattr(server.sys,'base_prefix',str(base))
+    monkeypatch.setattr(server.sys,'executable',str(tmp_path/'venv'/'Scripts'/'pythonw.exe'))
+    def selected(args,**kwargs):
+        assert Path(args[0])==base/('pythonw.exe' if gui_available else 'python.exe')
+        assert kwargs['creationflags']==server.media.CREATE_NO_WINDOW
+        assert not kwargs.get('shell',False)
+        return subprocess.CompletedProcess(args,0,'[]','')
+    monkeypatch.setattr(server.subprocess,'run',selected)
+    response=c.post('/api/pick-files')
+    assert response.status_code==200 and response.json()=={'paths':[]}
+
 def test_range_playback(client):
     c,_=client
     vid=c.get('/api/state').json()['videos'][0]['id']
@@ -83,7 +144,10 @@ def test_collection_scope_filters_catalog_and_accepts_new_categories(client):
         assert c.get('/api/events',params={'video_id':vid,'q':'普通教程字幕验证'}).json()['total']==0
         for kind in COLLECTION_KINDS:
             result=c.get('/api/events',params={'video_id':vid,'kind':kind,'q':'分类验证'}).json()
-            assert result['total']==1 and result['events'][0]['kind']==kind
+            if kind in {'memory_flower','reading_memory'}:
+                assert result['total']==2 and {e['kind'] for e in result['events']}=={'memory_flower','reading_memory'}
+            else:
+                assert result['total']==1 and result['events'][0]['kind']==kind
         assert c.post('/api/settings',json={'recognition_scope':'unknown'}).status_code==400
         options=server.validate_options({'recognition_scope':'collection_only','text_mode':'all'})
         assert options['text_mode']=='off'

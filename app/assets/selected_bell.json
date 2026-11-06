@@ -1,0 +1,90 @@
+{
+  "source": "User-supplied local game reference 铃铛-开端之地.png; analysis reference only",
+  "source_sha256": "35c09d31ec9b79ff16f2963f0a5741e1d2c02f55658578a607b3542b10f4e2e2",
+  "canonical_size": [
+    1600,
+    900
+  ],
+  "crop_xywh": [
+    862,
+    544,
+    79,
+    82
+  ],
+  "bell_xywh": [
+    29,
+    22,
+    20,
+    35
+  ],
+  "anchor_xy": [
+    40,
+    40
+  ],
+  "scope": "Selected map bell and surrounding cursor; names always come from OCR, not this template.",
+  "variants": [
+    {
+      "file": "selected_bell_travel.png",
+      "source": "User local recording cached frame at 1380 seconds",
+      "source_sha256": "2687d9a0156aa634277848c26732ced2f771d9c84b386a0341874dc36df8cf24",
+      "crop_xywh": [
+        756,
+        409,
+        84,
+        82
+      ],
+      "bell_xywh": [
+        28,
+        20,
+        30,
+        39
+      ],
+      "anchor_xy": [
+        43,
+        40
+      ]
+    },
+    {
+      "file": "selected_bell_dark.png",
+      "source": "User local recording cached frame; analysis reference only",
+      "source_sha256": "e29bb323dab04b6d23252fd7b9a63385d70c00a3a60405d2d85556faefd6abab",
+      "crop_xywh": [
+        756,
+        409,
+        84,
+        82
+      ],
+      "bell_xywh": [
+        28,
+        20,
+        30,
+        39
+      ],
+      "anchor_xy": [
+        43,
+        40
+      ]
+    },
+    {
+      "file": "selected_bell_current.png",
+      "source": "User local recording cached frame; analysis reference only",
+      "source_sha256": "5f621bc394e84b846cc7724aaf015bf5d7cbccf505300b24309566847a0b5650",
+      "crop_xywh": [
+        756,
+        409,
+        99,
+        82
+      ],
+      "bell_xywh": [
+        65,
+        20,
+        30,
+        39
+      ],
+      "anchor_xy": [
+        79,
+        40
+      ]
+    }
+  ]
+}

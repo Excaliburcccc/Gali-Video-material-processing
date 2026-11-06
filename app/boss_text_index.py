@@ -12,6 +12,7 @@ import math
 import re
 
 from .rules import clean_text, identity
+from .collection_aliases import verified_name
 
 _FULL = re.compile(r'^([\u3400-\u9fff]{2,12}):([\u3400-\u9fff]{2,12})$')
 _TOP_TEXT = re.compile(r'^[\u3400-\u9fff:]{1,26}$')
@@ -97,7 +98,7 @@ def _related(a,b):
     if aa==bb: return True
     if ':' in a and ':' in b:
         at,an=a.split(':',1);bt,bn=b.split(':',1)
-        if an==bn: return True
+        if an==bn and (at in bt or bt in at): return True
         # A shared rank/title alone cannot merge two different people. Require
         # agreement in the personal name as well as the title for OCR variants.
         name_sim=SequenceMatcher(None,an,bn,autojunk=False).ratio()
@@ -120,6 +121,23 @@ class BossTextIndex:
         self.merge_gap=float(merge_gap)
         self._last_time=None
         self._clear()
+
+    def filter_collections(self,candidates,lines,frame_shape,timestamp):
+        """Use HUD evidence and repeated readings in the typed collection path.
+
+        Category labels alone cannot seed a boss, and phase changes still need
+        their own complete title. Audited OCR spellings are normalized before
+        voting. The same encounter key survives a later spelling correction.
+        """
+        from dataclasses import replace
+        normalized=[replace(line,text=verified_name('boss',clean_text(line.text).replace('：',':')))
+                    for line in lines]
+        tracked=self.filter([],normalized,frame_shape,timestamp)
+        result=[c for c in candidates if not (c['kind']=='boss' and c.get('evidence')=='boss_name')]
+        for candidate in tracked:
+            candidate={**candidate,'kind':'boss'}
+            result.append(candidate)
+        return result
 
     def _clear(self):
         self._key=None; self._name=None; self._seed=None

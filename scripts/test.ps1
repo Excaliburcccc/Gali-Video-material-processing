@@ -13,8 +13,21 @@ $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) { throw 'Run setup.ps1 first.' }
 Push-Location $projectRoot
 try {
-    & $pythonPath -m pytest tests -q -p no:cacheprovider --basetemp (Join-Path $testRunRoot 'pytest')
+    # Each TestClient lifespan closes the service executors. Keep API suites in
+    # independent processes and libraries, including the batch export fixtures.
+    $apiSuites = @('tests/test_server.py', 'tests/test_projects_api.py', 'tests/test_batch_export_api.py')
+    $ignoreArgs = @($apiSuites | ForEach-Object { '--ignore=' + $_ })
+    & $pythonPath -m pytest tests @ignoreArgs -q -p no:cacheprovider --basetemp (Join-Path $testRunRoot 'pytest-unit')
     $testExitCode = $LASTEXITCODE
+    if ($testExitCode -eq 0) {
+        foreach ($suite in $apiSuites) {
+            $suiteName = [IO.Path]::GetFileNameWithoutExtension($suite)
+            $env:FOOTAGE_ROOT = Join-Path $testRunRoot $suiteName
+            & $pythonPath -m pytest $suite -q -p no:cacheprovider --basetemp (Join-Path $testRunRoot ('pytest-' + $suiteName))
+            $testExitCode = $LASTEXITCODE
+            if ($testExitCode -ne 0) { break }
+        }
+    }
 } finally {
     Pop-Location
 }
